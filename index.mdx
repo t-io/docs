@@ -1,0 +1,651 @@
+---
+title: "Developer API"
+description: "Programmatically analyze CVs, manage positions, and receive results via webhooks."
+---
+
+## Overview
+
+The RolescopeAI Developer API lets you integrate CV analysis directly into your
+ATS, recruitment platform, or internal tools. Upload candidate CVs, define
+position criteria, and receive structured scoring results — the same forensic
+analysis pipeline that powers the dashboard.
+
+**Base URL**
+
+```
+https://api.rolescope.ai/api/v1/developer
+```
+
+## Authentication
+
+All API requests require an API key passed in the `Authorization` header.
+
+```bash
+Authorization: Bearer rsk_live_a1b2c3d4e5f6...
+```
+
+There are two auth modes depending on the endpoint:
+
+| Mode | Header | Used for |
+|------|--------|----------|
+| **API Key** | `Bearer rsk_...` | All data endpoints (positions, candidates, credits, webhooks) |
+| **JWT** | `Bearer eyJ...` | Key management (`POST /keys`, `GET /keys`, `DELETE /keys`) and credit checkout |
+
+<Info>
+Most integrations only use API key auth. JWT auth is only needed for
+managing the keys themselves (creating, listing, revoking) and purchasing credits —
+both of which can also be done from the dashboard.
+</Info>
+
+### Getting your API key
+
+<Steps>
+  <Step title="Open Settings">
+    Log in to [app.rolescope.ai](https://app.rolescope.ai) and navigate to
+    **Settings → Developer**.
+  </Step>
+  <Step title="Create a key">
+    Click **Create API Key**, give it a name (e.g. "ATS Integration"), and
+    optionally set an expiration date.
+  </Step>
+  <Step title="Copy immediately">
+    The full key (starting with `rsk_`) is shown **once**. Copy it and store it
+    securely. You will not be able to see it again — only the prefix is stored.
+  </Step>
+  <Step title="Use it in requests">
+    Pass the key in the `Authorization: Bearer rsk_...` header on every API call.
+  </Step>
+</Steps>
+
+<Warning>
+Treat your API key like a password. Do not commit it to version control or
+expose it in client-side code. Use environment variables or a secrets manager.
+</Warning>
+
+---
+
+## Quickstart
+
+A minimal end-to-end flow: create a position, upload a CV, poll for results.
+
+<Steps>
+  <Step title="Create a position">
+    ```bash
+    curl -X POST https://api.rolescope.ai/api/v1/developer/positions \
+      -H "Authorization: Bearer $RSK_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "name": "Senior Backend Engineer",
+        "skills": ["Python", "FastAPI", "PostgreSQL"],
+        "min_experience_months": 36,
+        "location": "Berlin",
+        "work_mode": "remote",
+        "languages": ["English", "German"]
+      }'
+    ```
+  </Step>
+  <Step title="Get an upload URL">
+    ```bash
+    curl -X POST https://api.rolescope.ai/api/v1/developer/files/upload-url \
+      -H "Authorization: Bearer $RSK_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"filename": "resume.pdf"}'
+    ```
+  </Step>
+  <Step title="Upload the PDF">
+    Upload the file directly to the `upload_url` returned in the previous step.
+    ```bash
+    curl -X PUT "$UPLOAD_URL" \
+      -H "Content-Type: application/pdf" \
+      --data-binary @resume.pdf
+    ```
+  </Step>
+  <Step title="Submit the candidate">
+    ```bash
+    curl -X POST https://api.rolescope.ai/api/v1/developer/positions/$POSITION_ID/candidates \
+      -H "Authorization: Bearer $RSK_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"file_id": "'$FILE_ID'", "label": "Jane Doe"}'
+    ```
+  </Step>
+  <Step title="Poll for results">
+    ```bash
+    curl https://api.rolescope.ai/api/v1/developer/jobs/$JOB_ID \
+      -H "Authorization: Bearer $RSK_API_KEY"
+    ```
+    Repeat until `status` is `"completed"` or `"failed"`.
+  </Step>
+  <Step title="Get the analysis">
+    ```bash
+    curl https://api.rolescope.ai/api/v1/developer/candidates/$CANDIDATE_ID \
+      -H "Authorization: Bearer $RSK_API_KEY"
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Endpoints
+
+### Account
+
+#### Get account info
+
+```
+GET /me
+```
+
+Returns your account ID and current credit balance.
+
+<ResponseField name="account_id" type="string" required>
+  Your account identifier.
+</ResponseField>
+<ResponseField name="credits" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="balance" type="integer" required>Total token balance.</ResponseField>
+    <ResponseField name="reserved" type="integer" required>Tokens reserved for in-progress analyses.</ResponseField>
+    <ResponseField name="available" type="integer" required>Tokens available for new analyses (`balance - reserved`).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### API Keys
+
+<Note>
+Key management endpoints require **JWT auth** (admin role), not API key auth.
+These operations can also be performed from the dashboard under Settings → Developer.
+</Note>
+
+#### Create API key
+
+```
+POST /keys
+```
+
+<ParamField body="name" type="string" required>
+  A descriptive name for the key (e.g. "Production ATS").
+</ParamField>
+<ParamField body="expires_at" type="string">
+  Optional ISO 8601 expiration timestamp. Omit for non-expiring keys.
+</ParamField>
+
+<ResponseField name="key" type="string" required>
+  The full API key (`rsk_...`). **Shown only once** — store it securely.
+</ResponseField>
+<ResponseField name="id" type="string" required>Key ID for management operations.</ResponseField>
+<ResponseField name="name" type="string" required>The name you provided.</ResponseField>
+<ResponseField name="prefix" type="string" required>First 12 characters of the key (for identification).</ResponseField>
+
+#### List API keys
+
+```
+GET /keys
+```
+
+Returns all active (non-revoked) API keys. The full key is **never** returned — only the prefix.
+
+#### Revoke API key
+
+```
+DELETE /keys/{key_id}
+```
+
+Permanently revokes a key. Returns `204 No Content` on success.
+
+---
+
+### Credits
+
+#### Get balance and transactions
+
+```
+GET /credits
+```
+
+<ResponseField name="balance" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="balance" type="integer" required>Total token balance.</ResponseField>
+    <ResponseField name="reserved" type="integer" required>Tokens reserved for in-progress analyses.</ResponseField>
+    <ResponseField name="available" type="integer" required>Available tokens (`balance - reserved`).</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="transactions" type="array" required>
+  Last 20 transactions.
+  <Expandable title="transaction properties">
+    <ResponseField name="id" type="string" required>Transaction ID.</ResponseField>
+    <ResponseField name="type" type="string" required>Transaction type: `analysis_debit`, `purchase_credit`, `refund_credit`, etc.</ResponseField>
+    <ResponseField name="amount" type="integer" required>Signed amount (negative for debits).</ResponseField>
+    <ResponseField name="balance_after" type="integer" required>Balance after this transaction.</ResponseField>
+    <ResponseField name="description" type="string">Human-readable description.</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+#### Purchase credits
+
+```
+POST /credits/checkout
+```
+
+Creates a checkout session to purchase a credit pack. Requires **JWT auth** (admin).
+
+<ParamField body="pack_id" type="string" required>
+  One of: `starter` (300k tokens / €30), `growth` (550k tokens / €50), `scale` (1.2M tokens / €100).
+</ParamField>
+
+<ResponseField name="checkout_url" type="string" required>
+  Redirect the user to this URL to complete payment.
+</ResponseField>
+
+---
+
+### Skill Extraction
+
+#### Extract skills from job description
+
+```
+POST /extract-skills
+```
+
+Parse a job description into structured criteria. This is a **free** endpoint — no tokens are consumed.
+
+<ParamField body="text" type="string" required>
+  The job description text (10–50,000 characters).
+</ParamField>
+<ParamField body="language" type="string">
+  Language code (default: `en`).
+</ParamField>
+
+<ResponseField name="skills" type="string[]" required>Extracted skill names.</ResponseField>
+<ResponseField name="min_experience_months" type="integer">Minimum experience in months, if detected.</ResponseField>
+<ResponseField name="location" type="string">Location, if detected.</ResponseField>
+<ResponseField name="work_mode" type="string">One of `remote`, `hybrid`, `onsite`.</ResponseField>
+<ResponseField name="languages" type="string[]">Required spoken languages.</ResponseField>
+
+<Tip>
+Use this endpoint to pre-populate the `skills` array when creating a position.
+Paste the raw JD text and use the extracted skills directly.
+</Tip>
+
+---
+
+### Positions
+
+#### Create position
+
+```
+POST /positions
+```
+
+<ParamField body="name" type="string" required>Position title (e.g. "Senior Backend Engineer").</ParamField>
+<ParamField body="skills" type="string[]" required>Required skills. At least one.</ParamField>
+<ParamField body="min_experience_months" type="integer">Minimum experience in months.</ParamField>
+<ParamField body="location" type="string">Office location.</ParamField>
+<ParamField body="work_mode" type="string">One of `remote`, `hybrid`, `onsite`.</ParamField>
+<ParamField body="languages" type="string[]">Required spoken languages.</ParamField>
+<ParamField body="job_description" type="string">Full job description text (stored for context in analysis).</ParamField>
+
+<ResponseField name="id" type="string" required>Position ID — use this for candidate uploads.</ResponseField>
+<ResponseField name="name" type="string" required>Position title.</ResponseField>
+<ResponseField name="skills" type="string[]" required>Required skills.</ResponseField>
+<ResponseField name="status" type="string" required>Always `active` on creation.</ResponseField>
+<ResponseField name="created_at" type="string" required>ISO 8601 timestamp.</ResponseField>
+
+#### List positions
+
+```
+GET /positions
+```
+
+Returns all positions for your account.
+
+#### Get position
+
+```
+GET /positions/{position_id}
+```
+
+Returns a single position by ID.
+
+---
+
+### File Upload
+
+#### Get upload URL
+
+```
+POST /files/upload-url
+```
+
+Returns a pre-signed URL for direct file upload to storage. The URL expires after **1 hour**.
+
+<ParamField body="filename" type="string" required>Original filename (e.g. `resume.pdf`).</ParamField>
+<ParamField body="content_type" type="string">MIME type (default: `application/pdf`).</ParamField>
+
+<ResponseField name="upload_url" type="string" required>Pre-signed upload URL. `PUT` the file to this URL.</ResponseField>
+<ResponseField name="file_id" type="string" required>File identifier — pass this when creating a candidate.</ResponseField>
+<ResponseField name="expires_at" type="string" required>URL expiration timestamp.</ResponseField>
+
+<Note>
+Upload the file with a `PUT` request directly to `upload_url`. Set the
+`Content-Type` header to match the file type (e.g. `application/pdf`).
+</Note>
+
+---
+
+### Candidates
+
+#### Upload single candidate
+
+```
+POST /positions/{position_id}/candidates
+```
+
+Submit a CV for analysis against a position. Returns a `job_id` for polling.
+
+<ParamField body="file_id" type="string" required>
+  The `file_id` from the upload URL response.
+</ParamField>
+<ParamField body="label" type="string">
+  Optional human-readable label (e.g. candidate name).
+</ParamField>
+
+<ResponseField name="job_id" type="string" required>Job ID for polling status.</ResponseField>
+<ResponseField name="candidate_id" type="string" required>Candidate record ID for fetching results.</ResponseField>
+<ResponseField name="status" type="string" required>Initially `pending`.</ResponseField>
+
+<Warning>
+This endpoint **reserves tokens** from your balance. If the analysis fails,
+tokens are automatically refunded. If your balance is insufficient, the request
+returns `402 Payment Required`.
+</Warning>
+
+#### Batch upload candidates
+
+```
+POST /positions/{position_id}/candidates/batch
+```
+
+Upload multiple candidates at once. Each candidate can have one or more files
+(multi-file candidates trigger automatic document classification).
+
+<ParamField body="candidates" type="array" required>
+  Array of candidate entries (max 50).
+  <Expandable title="candidate entry">
+    <ParamField body="label" type="string" required>Candidate label / name.</ParamField>
+    <ParamField body="files" type="string[]" required>
+      One or more `file_id` values from upload URL responses.
+      Multiple files trigger smart document classification (resume vs. cover letter vs. reference).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ResponseField name="batch_id" type="string" required>Batch ID for polling all jobs at once.</ResponseField>
+<ResponseField name="jobs" type="array" required>
+  <Expandable title="job entry">
+    <ResponseField name="job_id" type="string" required>Individual job ID.</ResponseField>
+    <ResponseField name="label" type="string" required>The label you provided.</ResponseField>
+    <ResponseField name="status" type="string" required>Initially `pending`.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="total_tokens_reserved" type="integer" required>
+  Total tokens reserved for the batch.
+</ResponseField>
+
+#### Get candidate results
+
+```
+GET /candidates/{candidate_id}
+```
+
+Returns full analysis results once processing is complete.
+
+<ResponseField name="id" type="string" required>Candidate ID.</ResponseField>
+<ResponseField name="name" type="string">Extracted candidate name.</ResponseField>
+<ResponseField name="email" type="string">Extracted email.</ResponseField>
+<ResponseField name="score" type="integer">Match score (0–100). `null` while processing.</ResponseField>
+<ResponseField name="processing_status" type="string" required>
+  One of: `pending`, `processing`, `analyzed`, `failed`.
+</ResponseField>
+<ResponseField name="cv_analysis" type="object">
+  Full CV analysis keyed by language (e.g. `{"en": {...}}`). Contains `scoreBreakdown`,
+  `extractedData`, `skillTimelines`, and more.
+</ResponseField>
+<ResponseField name="cover_letter_analysis" type="object">
+  Cover letter analysis (if a cover letter was detected).
+</ResponseField>
+<ResponseField name="employment_references" type="array">
+  Employment reference analyses (if reference letters were detected).
+</ResponseField>
+
+---
+
+### Jobs
+
+#### Poll job status
+
+```
+GET /jobs/{job_id}
+```
+
+<ResponseField name="id" type="string" required>Job ID.</ResponseField>
+<ResponseField name="type" type="string" required>Always `analyze_candidate`.</ResponseField>
+<ResponseField name="status" type="string" required>
+  One of: `pending`, `processing`, `completed`, `failed`.
+</ResponseField>
+<ResponseField name="candidate_id" type="string">The candidate record ID.</ResponseField>
+<ResponseField name="tokens_charged" type="integer">Actual tokens consumed (available after completion).</ResponseField>
+<ResponseField name="error_message" type="string">Error details if `status` is `failed`.</ResponseField>
+<ResponseField name="completed_at" type="string">ISO 8601 completion timestamp.</ResponseField>
+
+<Tip>
+Poll every 2–5 seconds. A typical analysis takes 15–45 seconds depending on
+CV length and document count.
+</Tip>
+
+#### Poll batch status
+
+```
+GET /batches/{batch_id}
+```
+
+Returns status for all jobs in a batch.
+
+<ResponseField name="batch_id" type="string" required>Batch ID.</ResponseField>
+<ResponseField name="jobs" type="array" required>Array of job objects (same shape as single job).</ResponseField>
+<ResponseField name="total_completed" type="integer" required>Number of completed jobs.</ResponseField>
+<ResponseField name="total_failed" type="integer" required>Number of failed jobs.</ResponseField>
+<ResponseField name="total_pending" type="integer" required>Number of pending/processing jobs.</ResponseField>
+
+---
+
+### Webhooks
+
+Instead of polling, you can register webhooks to receive `job.completed` and
+`job.failed` events as they happen.
+
+#### Create webhook
+
+```
+POST /webhooks
+```
+
+<ParamField body="url" type="string" required>
+  HTTPS endpoint URL that will receive webhook events.
+</ParamField>
+<ParamField body="events" type="string[]">
+  Events to subscribe to. Default: `["job.completed", "job.failed"]`.
+</ParamField>
+
+<ResponseField name="id" type="string" required>Webhook ID.</ResponseField>
+<ResponseField name="url" type="string" required>Registered URL.</ResponseField>
+<ResponseField name="events" type="string[]" required>Subscribed events.</ResponseField>
+<ResponseField name="secret" type="string" required>
+  HMAC signing secret. **Shown only once** — store it securely.
+</ResponseField>
+
+#### List webhooks
+
+```
+GET /webhooks
+```
+
+Returns all webhook configurations. The `secret` is **never** returned after creation.
+
+#### Delete webhook
+
+```
+DELETE /webhooks/{webhook_id}
+```
+
+Returns `204 No Content` on success.
+
+#### Get webhook deliveries
+
+```
+GET /webhooks/{webhook_id}/deliveries
+```
+
+Returns the delivery log for a webhook (status, HTTP response code, attempts).
+
+---
+
+### Webhook Payload
+
+When an event fires, RolescopeAI sends a `POST` request to your webhook URL.
+
+**Headers**
+
+| Header | Description |
+|--------|-------------|
+| `Content-Type` | `application/json` |
+| `X-RolescopeAI-Signature` | `sha256=<hex-digest>` — HMAC-SHA256 of the request body using your webhook secret |
+| `X-RolescopeAI-Event` | Event type: `job.completed` or `job.failed` |
+
+**Payload**
+
+```json
+{
+  "event": "job.completed",
+  "timestamp": "2026-04-02T14:30:00Z",
+  "data": {
+    "job_id": "abc-123",
+    "type": "analyze_candidate",
+    "status": "completed",
+    "position_id": "pos-456",
+    "candidate_id": "cand-789",
+    "label": "Jane Doe",
+    "tokens_charged": 35000,
+    "completed_at": "2026-04-02T14:30:00Z",
+    "result": { }
+  }
+}
+```
+
+For `job.failed` events, the `data` object includes an `error` field instead of `result`.
+
+#### Verifying webhook signatures
+
+<CodeGroup>
+```python Python
+import hmac
+import hashlib
+
+def verify_signature(payload_bytes: bytes, secret: str, signature_header: str) -> bool:
+    """Verify the X-RolescopeAI-Signature header."""
+    expected = hmac.new(
+        secret.encode(),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+    received = signature_header.removeprefix("sha256=")
+    return hmac.compare_digest(expected, received)
+```
+
+```javascript Node.js
+const crypto = require("crypto");
+
+function verifySignature(payloadBuffer, secret, signatureHeader) {
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(payloadBuffer)
+    .digest("hex");
+  const received = signatureHeader.replace("sha256=", "");
+  return crypto.timingSafeEqual(
+    Buffer.from(expected),
+    Buffer.from(received)
+  );
+}
+```
+</CodeGroup>
+
+<Warning>
+Always verify the signature before processing webhook payloads. Reject
+requests with missing or invalid signatures.
+</Warning>
+
+---
+
+## Error Handling
+
+All error responses follow a consistent shape:
+
+```json
+{
+  "detail": "Position not found"
+}
+```
+
+Or for structured errors:
+
+```json
+{
+  "detail": {
+    "message": "Insufficient token balance",
+    "code": "INSUFFICIENT_TOKENS"
+  }
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `400` | Bad request — invalid parameters or request body |
+| `401` | Unauthorized — missing or invalid API key |
+| `402` | Payment required — insufficient token balance |
+| `404` | Not found — resource doesn't exist or doesn't belong to your account |
+| `422` | Validation error — request body failed schema validation |
+| `500` | Internal server error |
+
+---
+
+## Token Costs
+
+Each CV analysis consumes tokens from your balance. Tokens are **reserved**
+when you submit a candidate and **finalized** when processing completes.
+If analysis fails, reserved tokens are refunded.
+
+| Credit Pack | Tokens | Price |
+|-------------|--------|-------|
+| Starter | 300,000 | €30 |
+| Growth | 550,000 | €50 |
+| Scale | 1,200,000 | €100 |
+
+<Tip>
+Use the `GET /credits` endpoint to monitor your balance, or set up a webhook
+to track `job.completed` events which include the `tokens_charged` field.
+</Tip>
+
+---
+
+## Rate Limits
+
+The API is rate-limited per account. Current limits:
+
+| Scope | Limit |
+|-------|-------|
+| General requests | 100 req/min |
+| Candidate uploads | 50 req/min |
+| Batch uploads | 10 req/min |
+
+Rate-limited responses return `429 Too Many Requests` with a `Retry-After` header.
